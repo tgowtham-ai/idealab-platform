@@ -760,3 +760,15 @@ const startServer = async () => {
 };
 
 startServer();
+
+// Health check for Railway
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString() 
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({ message: 'IdeaLab API Server' });
+});
