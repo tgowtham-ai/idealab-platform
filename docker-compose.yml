@@ -1,0 +1,711 @@
+# docker-compose.yml - Complete containerized setup
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: idealab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: idealab_db
+      POSTGRES_USER: idealab_user
+      POSTGRES_PASSWORD: secure_password_123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/setup.sql:/docker-entrypoint-initdb.d/setup.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - idealab-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idealab_user -d idealab_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching and sessions
+  redis:
+    image: redis:7-alpine
+    container_name: idealab-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - idealab-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: idealab-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgresql://idealab_user:secure_password_123@postgres:5432/idealab_db
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-min-32-characters-long}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    ports:
+      - "3001:3001"
+    networks:
+      - idealab-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend React Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:3001/api}
+    container_name: idealab-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - idealab-network
+    depends_on:
+      - backend
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: idealab-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/sites-available:/etc/nginx/sites-available
+      - ./ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    networks:
+      - idealab-network
+    depends_on:
+      - frontend
+      - backend
+
+  # Monitoring with Prometheus (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: idealab-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - idealab-network
+    profiles:
+      - monitoring
+
+  # Grafana for monitoring dashboards (Optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: idealab-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    networks:
+      - idealab-network
+    profiles:
+      - monitoring
+
+networks:
+  idealab-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+---
+# Backend Dockerfile
+# Create this as ./backend/Dockerfile
+
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy source code
+COPY . .
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Production stage
+FROM node:18-alpine AS production
+
+WORKDIR /app
+
+# Install dumb-init for proper signal handling
+RUN apk add --no-cache dumb-init
+
+# Copy built application
+COPY --from=builder --chown=nodejs:nodejs /app .
+
+# Create necessary directories
+RUN mkdir -p logs uploads && \
+    chown -R nodejs:nodejs logs uploads
+
+# Switch to non-root user
+USER nodejs
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD node healthcheck.js
+
+EXPOSE 3001
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]
+
+---
+# Frontend Dockerfile
+# Create this as ./frontend/Dockerfile
+
+# Build stage
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --silent
+
+# Copy source code
+COPY . .
+
+# Build arguments
+ARG REACT_APP_API_URL
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
+
+# Build the application
+RUN npm run build
+
+# Production stage
+FROM nginx:alpine AS production
+
+# Copy custom nginx config
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy built app
+COPY --from=builder /app/build /usr/share/nginx/html
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+
+---
+# Frontend nginx.conf
+# Create this as ./frontend/nginx.conf
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    
+    # Logging
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+                    
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log warn;
+    
+    # Performance
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+    
+    server {
+        listen 80;
+        server_name localhost;
+        root /usr/share/nginx/html;
+        index index.html;
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        
+        # Handle React Router
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+        
+        # Cache static assets
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+        
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}
+
+---
+# Docker Compose Environment File
+# Create this as .env
+
+# Application Configuration
+NODE_ENV=production
+FRONTEND_URL=http://localhost:3000
+REACT_APP_API_URL=http://localhost:3001/api
+
+# Database Configuration
+POSTGRES_DB=idealab_db
+POSTGRES_USER=idealab_user
+POSTGRES_PASSWORD=secure_password_123
+
+# JWT Secret (Generate a secure one!)
+JWT_SECRET=your-super-secret-jwt-key-min-32-characters-long
+
+# AI Configuration
+ANTHROPIC_API_KEY=your-anthropic-api-key-here
+
+# Monitoring (Optional)
+GF_SECURITY_ADMIN_PASSWORD=admin123
+
+---
+# Health Check Script for Backend
+# Create this as ./backend/healthcheck.js
+
+const http = require('http');
+
+const options = {
+  host: 'localhost',
+  port: process.env.PORT || 3001,
+  path: '/api/health',
+  timeout: 2000
+};
+
+const request = http.request(options, (res) => {
+  console.log(`Health check status: ${res.statusCode}`);
+  if (res.statusCode === 200) {
+    process.exit(0);
+  } else {
+    process.exit(1);
+  }
+});
+
+request.on('error', (err) => {
+  console.log('Health check failed:', err.message);
+  process.exit(1);
+});
+
+request.on('timeout', () => {
+  console.log('Health check timeout');
+  request.destroy();
+  process.exit(1);
+});
+
+request.end();
+
+---
+# Makefile for easy management
+# Create this as ./Makefile
+
+.PHONY: help build up down logs clean install test
+
+help: ## Show this help message
+	@echo 'Usage: make [target]'
+	@echo ''
+	@echo 'Targets:'
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $1, $2}' $(MAKEFILE_LIST)
+
+install: ## Install dependencies
+	cd backend && npm install
+	cd frontend && npm install
+
+build: ## Build all Docker images
+	docker-compose build --no-cache
+
+up: ## Start all services
+	docker-compose up -d
+
+up-dev: ## Start services in development mode
+	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+down: ## Stop all services
+	docker-compose down
+
+logs: ## View logs from all services
+	docker-compose logs -f
+
+logs-backend: ## View backend logs
+	docker-compose logs -f backend
+
+logs-frontend: ## View frontend logs
+	docker-compose logs -f frontend
+
+logs-db: ## View database logs
+	docker-compose logs -f postgres
+
+restart: ## Restart all services
+	docker-compose restart
+
+restart-backend: ## Restart backend service
+	docker-compose restart backend
+
+clean: ## Clean up containers, networks, and volumes
+	docker-compose down -v --remove-orphans
+	docker system prune -f
+
+backup: ## Backup database
+	docker-compose exec postgres pg_dump -U idealab_user idealab_db > backup_$(date +%Y%m%d_%H%M%S).sql
+
+restore: ## Restore database (usage: make restore FILE=backup.sql)
+	docker-compose exec -T postgres psql -U idealab_user -d idealab_db < $(FILE)
+
+shell-backend: ## Access backend container shell
+	docker-compose exec backend sh
+
+shell-db: ## Access database shell
+	docker-compose exec postgres psql -U idealab_user -d idealab_db
+
+monitoring-up: ## Start with monitoring stack
+	docker-compose --profile monitoring up -d
+
+test: ## Run tests
+	cd backend && npm test
+	cd frontend && npm test
+
+lint: ## Run linting
+	cd backend && npm run lint
+	cd frontend && npm run lint
+
+update: ## Update dependencies
+	cd backend && npm update
+	cd frontend && npm update
+
+status: ## Show container status
+	docker-compose ps
+
+---
+# Development Docker Compose Override
+# Create this as docker-compose.dev.yml
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      target: builder
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  frontend:
+    build:
+      target: builder
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm start
+    ports:
+      - "3000:3000"
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+---
+# Production Deployment Script
+# Create this as deploy.sh
+
+#!/bin/bash
+
+set -e
+
+echo "🚀 Starting IdeaLab deployment..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_step() {
+    echo -e "${BLUE}📋 $1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+# Check if .env file exists
+if [ ! -f .env ]; then
+    print_error ".env file not found. Please create one from .env.example"
+    exit 1
+fi
+
+# Load environment variables
+source .env
+
+print_step "Pre-deployment checks"
+
+# Check if Docker is running
+if ! docker info > /dev/null 2>&1; then
+    print_error "Docker is not running. Please start Docker and try again."
+    exit 1
+fi
+
+# Check if Docker Compose is available
+if ! command -v docker-compose &> /dev/null; then
+    print_error "Docker Compose is not installed."
+    exit 1
+fi
+
+print_success "Pre-deployment checks passed"
+
+print_step "Building application images"
+docker-compose build --no-cache
+
+print_step "Starting database and cache services"
+docker-compose up -d postgres redis
+
+# Wait for database to be ready
+print_step "Waiting for database to be ready..."
+timeout 60 bash -c 'until docker-compose exec -T postgres pg_isready -U idealab_user -d idealab_db; do sleep 1; done'
+
+print_step "Running database migrations"
+# Add migration commands here if needed
+
+print_step "Starting application services"
+docker-compose up -d
+
+print_step "Waiting for services to be healthy..."
+timeout 120 bash -c 'until docker-compose ps | grep -q "healthy"; do sleep 2; done'
+
+print_success "Deployment completed successfully! 🎉"
+
+echo ""
+echo "📊 Service Status:"
+docker-compose ps
+
+echo ""
+echo "🌐 Application URLs:"
+echo "Frontend: http://localhost:3000"
+echo "Backend API: http://localhost:3001/api"
+echo "Database: localhost:5432"
+
+print_warning "Next steps:"
+echo "1. Update your domain configuration"
+echo "2. Set up SSL certificates"
+echo "3. Configure monitoring"
+echo "4. Set up backups"
+
+---
+# Quick Start Guide
+# Create this as QUICK_START.md
+
+# IdeaLab Platform - Quick Start Guide
+
+## 🚀 Option 1: Docker Deployment (Recommended)
+
+### Prerequisites
+- Docker 20.0+ and Docker Compose
+- 4GB+ RAM available
+- 10GB+ disk space
+
+### Quick Deploy
+```bash
+# Clone the repository
+git clone <your-repo-url>
+cd idealab-platform
+
+# Copy environment file
+cp .env.example .env
+
+# Edit .env file with your configuration
+nano .env
+
+# Start the platform
+make up
+
+# View logs
+make logs
+```
+
+### Access Your Platform
+- 🌐 Frontend: http://localhost:3000
+- 📡 API: http://localhost:3001/api
+- 📊 Database: localhost:5432
+
+## 🛠️ Option 2: Manual Installation
+
+### Prerequisites
+- Node.js 18+
+- PostgreSQL 13+
+- Redis (optional, for caching)
+
+### Setup Steps
+```bash
+# 1. Database Setup
+sudo -u postgres createuser idealab_user
+sudo -u postgres createdb idealab_db -O idealab_user
+psql -U idealab_user -d idealab_db -f database/setup.sql
+
+# 2. Backend Setup
+cd backend
+npm install
+cp .env.example .env
+# Edit .env with your database credentials
+npm start
+
+# 3. Frontend Setup (in new terminal)
+cd frontend
+npm install
+npm start
+```
+
+## 🔑 Default Credentials
+- Admin: admin@idealab.com / admin123
+- Mentor: mentor@idealab.com / mentor123
+
+**⚠️ Change these passwords immediately!**
+
+## 📋 Common Commands
+```bash
+# Docker management
+make up           # Start all services
+make down         # Stop all services  
+make logs         # View logs
+make backup       # Backup database
+make clean        # Clean everything
+
+# Development
+make up-dev       # Start in dev mode
+make shell-backend # Access backend shell
+make test         # Run tests
+```
+
+## 🆘 Troubleshooting
+
+### Database Connection Issues
+```bash
+# Check if PostgreSQL is running
+docker-compose ps postgres
+
+# View database logs
+make logs-db
+
+# Reset database
+make down
+docker volume rm idealab-platform_postgres_data
+make up
+```
+
+### Backend Issues
+```bash
+# View backend logs
+make logs-backend
+
+# Restart backend
+make restart-backend
+
+# Access backend shell
+make shell-backend
+```
+
+### Port Conflicts
+If ports 3000, 3001, or 5432 are in use, edit docker-compose.yml to use different ports.
+
+### Memory Issues
+Ensure Docker has at least 4GB RAM allocated.
+
+## 📚 Next Steps
+1. 🔐 [Security Configuration](docs/SECURITY.md)
+2. 📊 [Monitoring Setup](docs/MONITORING.md)
+3. 🚀 [Production Deployment](docs/PRODUCTION.md)
+4. 🔧 [API Documentation](docs/API.md)
+
+## 💬 Support
+- 📧 Email: support@idealab.com
+- 📖 Documentation: /docs
+- 🐛 Issues: GitHub Issues
+
+Happy innovating! 🎉
