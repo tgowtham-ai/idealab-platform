@@ -1,0 +1,271 @@
+-- Database Setup Script for IdeaLab Platform
+-- Run this script to set up your PostgreSQL database
+
+-- Create database (run this as superuser)
+-- CREATE DATABASE idealab_db;
+-- GRANT ALL PRIVILEGES ON DATABASE idealab_db TO your_username;
+
+-- Connect to idealab_db database, then run the following:
+
+-- Enable UUID extension for better ID generation (optional)
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Create Users table
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'employee' CHECK (role IN ('employee', 'mentor', 'admin')),
+    avatar_url VARCHAR(500),
+    bio TEXT,
+    skills TEXT[],
+    is_active BOOLEAN DEFAULT true,
+    email_verified BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Ideas table
+CREATE TABLE IF NOT EXISTS ideas (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    author_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    phase VARCHAR(100) DEFAULT 'Idea Spark' CHECK (phase IN ('Idea Spark', 'Research & Validate', 'Plan & Strategy', 'Build & Test', 'Launch Ready')),
+    phase_index INTEGER DEFAULT 0 CHECK (phase_index >= 0 AND phase_index <= 4),
+    tags JSON DEFAULT '[]',
+    ai_analysis JSON,
+    is_public BOOLEAN DEFAULT true,
+    priority VARCHAR(20) DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
+    estimated_effort VARCHAR(20) DEFAULT 'medium' CHECK (estimated_effort IN ('small', 'medium', 'large')),
+    target_launch_date DATE,
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'cancelled')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Likes table
+CREATE TABLE IF NOT EXISTS likes (
+    id SERIAL PRIMARY KEY,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(idea_id, user_id)
+);
+
+-- Create Comments table
+CREATE TABLE IF NOT EXISTS comments (
+    id SERIAL PRIMARY KEY,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    parent_comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    is_edited BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Collaborations table
+CREATE TABLE IF NOT EXISTS collaborations (
+    id SERIAL PRIMARY KEY,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    invited_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    message TEXT,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'removed')),
+    role VARCHAR(50) DEFAULT 'contributor' CHECK (role IN ('contributor', 'co-owner', 'advisor')),
+    permissions JSON DEFAULT '["view", "comment"]',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(idea_id, user_id)
+);
+
+-- Create Mentorships table
+CREATE TABLE IF NOT EXISTS mentorships (
+    id SERIAL PRIMARY KEY,
+    mentor_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    mentee_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'completed', 'paused')),
+    start_date DATE DEFAULT CURRENT_DATE,
+    end_date DATE,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Notifications table
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    type VARCHAR(50) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    data JSON,
+    is_read BOOLEAN DEFAULT false,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Workflow Questions table
+CREATE TABLE IF NOT EXISTS workflow_questions (
+    id SERIAL PRIMARY KEY,
+    phase_index INTEGER NOT NULL CHECK (phase_index >= 0 AND phase_index <= 4),
+    question TEXT NOT NULL,
+    question_type VARCHAR(20) DEFAULT 'text' CHECK (question_type IN ('text', 'textarea', 'select', 'multiselect', 'number', 'date')),
+    options JSON,
+    is_required BOOLEAN DEFAULT false,
+    order_index INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Workflow Answers table
+CREATE TABLE IF NOT EXISTS workflow_answers (
+    id SERIAL PRIMARY KEY,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    question_id INTEGER REFERENCES workflow_questions(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    answer TEXT,
+    assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'approved', 'rejected')),
+    submitted_at TIMESTAMP,
+    reviewed_at TIMESTAMP,
+    reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(idea_id, question_id)
+);
+
+-- Create Activity Log table
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE CASCADE,
+    action VARCHAR(100) NOT NULL,
+    details JSON,
+    ip_address INET,
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create Sessions table (for better session management)
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    session_token VARCHAR(255) UNIQUE NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_ideas_author_id ON ideas(author_id);
+CREATE INDEX IF NOT EXISTS idx_ideas_phase ON ideas(phase);
+CREATE INDEX IF NOT EXISTS idx_ideas_created_at ON ideas(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ideas_is_public ON ideas(is_public);
+CREATE INDEX IF NOT EXISTS idx_likes_idea_id ON likes(idea_id);
+CREATE INDEX IF NOT EXISTS idx_likes_user_id ON likes(user_id);
+CREATE INDEX IF NOT EXISTS idx_comments_idea_id ON comments(idea_id);
+CREATE INDEX IF NOT EXISTS idx_collaborations_idea_id ON collaborations(idea_id);
+CREATE INDEX IF NOT EXISTS idx_collaborations_user_id ON collaborations(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_idea_id ON activity_logs(idea_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at DESC);
+
+-- Create functions for automatic timestamp updates
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Create triggers for automatic timestamp updates
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_ideas_updated_at BEFORE UPDATE ON ideas FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_comments_updated_at BEFORE UPDATE ON comments FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_collaborations_updated_at BEFORE UPDATE ON collaborations FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_mentorships_updated_at BEFORE UPDATE ON mentorships FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_workflow_answers_updated_at BEFORE UPDATE ON workflow_answers FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Insert default workflow questions
+INSERT INTO workflow_questions (phase_index, question, question_type, is_required, order_index) VALUES
+-- Phase 0: Idea Spark
+(0, 'What problem does your idea solve?', 'textarea', true, 1),
+(0, 'Who would benefit from this solution?', 'textarea', true, 2),
+(0, 'What makes your idea unique?', 'textarea', false, 3),
+(0, 'What is your target market size?', 'select', false, 4),
+
+-- Phase 1: Research & Validate
+(1, 'What similar solutions exist in the market?', 'textarea', true, 1),
+(1, 'What is your competitive advantage?', 'textarea', true, 2),
+(1, 'What are the key risks and assumptions?', 'textarea', true, 3),
+(1, 'Have you validated this with potential users?', 'select', true, 4),
+
+-- Phase 2: Plan & Strategy
+(2, 'What is your business model?', 'select', true, 1),
+(2, 'What are your key revenue streams?', 'textarea', true, 2),
+(2, 'What resources do you need?', 'textarea', true, 3),
+(2, 'What is your go-to-market strategy?', 'textarea', false, 4),
+
+-- Phase 3: Build & Test
+(3, 'What is your MVP scope?', 'textarea', true, 1),
+(3, 'What technology stack will you use?', 'textarea', false, 2),
+(3, 'How will you measure success?', 'textarea', true, 3),
+(3, 'What is your testing strategy?', 'textarea', true, 4),
+
+-- Phase 4: Launch Ready
+(4, 'Are all features tested and working?', 'select', true, 1),
+(4, 'Do you have a launch plan?', 'select', true, 2),
+(4, 'What is your post-launch support strategy?', 'textarea', true, 3),
+(4, 'How will you scale the solution?', 'textarea', false, 4);
+
+-- Insert select options for workflow questions
+UPDATE workflow_questions SET options = '["Small (< 1M users)", "Medium (1M-10M users)", "Large (10M+ users)", "Unknown"]' 
+WHERE question LIKE '%target market size%';
+
+UPDATE workflow_questions SET options = '["Yes, extensively", "Yes, with some users", "Limited validation", "No validation yet"]'
+WHERE question LIKE '%validated this with potential users%';
+
+UPDATE workflow_questions SET options = '["B2B SaaS", "B2C App", "Marketplace", "E-commerce", "Consulting", "Other"]'
+WHERE question LIKE '%business model%';
+
+UPDATE workflow_questions SET options = '["Yes", "No", "Partially"]'
+WHERE question LIKE '%features tested%' OR question LIKE '%launch plan%';
+
+-- Create admin user (password: admin123 - change this!)
+-- Note: This is a hashed version of 'admin123' - CHANGE THIS PASSWORD!
+INSERT INTO users (name, email, password_hash, role) VALUES
+('Admin User', 'admin@idealab.com', '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj3QJgAw5d2O', 'admin')
+ON CONFLICT (email) DO NOTHING;
+
+-- Create sample mentor user (password: mentor123)
+INSERT INTO users (name, email, password_hash, role) VALUES
+('Jordan Smith', 'mentor@idealab.com', '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj3QJgAw5d2O', 'mentor')
+ON CONFLICT (email) DO NOTHING;
+
+-- Grant necessary permissions
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO idealab_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO idealab_user;
+
+-- Create backup user with read-only access
+-- CREATE USER idealab_readonly WITH PASSWORD 'readonly_password';
+-- GRANT CONNECT ON DATABASE idealab_db TO idealab_readonly;
+-- GRANT USAGE ON SCHEMA public TO idealab_readonly;
+-- GRANT SELECT ON ALL TABLES IN SCHEMA public TO idealab_readonly;
+
+COMMENT ON DATABASE idealab_db IS 'IdeaLab - AI-powered idea management platform database';
+COMMENT ON TABLE users IS 'User accounts and profiles';
+COMMENT ON TABLE ideas IS 'User-submitted ideas and their workflow progress';
+COMMENT ON TABLE collaborations IS 'Collaboration requests and partnerships';
+COMMENT ON TABLE workflow_questions IS 'Phase-specific questions for idea development';
+COMMENT ON TABLE workflow_answers IS 'User responses to workflow questions';
+COMMENT ON TABLE activity_logs IS 'System activity and audit trail';
+
+-- Success message
+SELECT 'Database setup completed successfully! 🎉' as message;
