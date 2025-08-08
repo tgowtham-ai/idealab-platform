@@ -2,17 +2,20 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Copy backend files
+# Copy package files
 COPY backend/package*.json ./
-RUN npm ci --only=production
 
+# Use better npm install command
+RUN npm ci --omit=dev --no-audit --no-fund
+
+# Copy backend source
 COPY backend/ ./
 
 # Create user and directories
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 && \
     mkdir -p logs uploads && \
-    chown -R nodejs:nodejs logs uploads
+    chown -R nodejs:nodejs /app
 
 USER nodejs
 
