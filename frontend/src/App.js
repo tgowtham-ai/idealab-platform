@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Plus, Heart, MessageCircle, Users, Star, TrendingUp, Bell, User, X, Check, Lightbulb, Target, Rocket, Award, Settings, Eye, Send, LogIn, LogOut, UserPlus } from 'lucide-react';
 
+// Add this line at the top
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001/api';
+
 const App = () => {
   // Authentication State
   const [user, setUser] = useState(null);
